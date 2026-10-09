@@ -740,11 +740,12 @@ impl<B: Buffer, F: Framebuffer> FrameState<B, F> {
         surface: &DrmSurface,
         supports_fencing: bool,
         allow_partial_update: bool,
+        flip_flags: PageFlipFlags,
     ) -> Result<(), crate::backend::drm::error::Error> {
         debug_assert!(!self.planes.iter().any(|(_, state)| state.needs_test));
         surface.commit(
             self.build_planes(surface, supports_fencing, allow_partial_update),
-            PageFlipFlags::EVENT,
+            flip_flags,
         )
     }
 
@@ -2529,7 +2530,12 @@ where
 
         let flip = prepared_frame
             .frame
-            .commit(&self.surface, self.supports_fencing, false)
+            .commit(
+                &self.surface,
+                self.supports_fencing,
+                false,
+                PageFlipFlags::empty(),
+            )
             .map(|_| PresentationMode::VSync);
 
         let res = self.handle_flip(&prepared_frame, flip);
@@ -2569,7 +2575,12 @@ where
         let flip = if self.surface.commit_pending() {
             prepared_frame
                 .frame
-                .commit(&self.surface, self.supports_fencing, allow_partial_update)
+                .commit(
+                    &self.surface,
+                    self.supports_fencing,
+                    allow_partial_update,
+                    PageFlipFlags::EVENT,
+                )
                 .map(|_| PresentationMode::VSync)
         } else {
             let previous_state = self
@@ -2615,6 +2626,7 @@ where
             // and failed. An async page flip can for example also fail for certain modifiers,
             // for example on intel compressed formats might not be allowed.
             if prepared_frame.presentation_mode == PresentationMode::Async
+                && self.surface.supports_async_page_flips()
                 && only_primary_changed
                 && primary_is_compatible
                 && allow_partial_update
@@ -2680,7 +2692,6 @@ where
                 if prepared_frame.kind == PreparedFrameKind::Full {
                     self.reset_pending = false;
                 }
-
             }
             Err(crate::backend::drm::error::Error::Access(ref access))
                 if access.source.kind() == ErrorKind::InvalidInput =>
@@ -2713,7 +2724,9 @@ where
         flip.map_err(FrameError::DrmError)
     }
 
-    /// Access the currently pending frame without submitting it
+    /// Access the currently pending frame without submitting it.
+    ///
+    /// The presentation mode records the submitted flip, including synchronous fallback.
     pub fn pending_frame(&self) -> Option<FrameRef<'_, U>> {
         self.pending_frame.as_ref().map(|frame| FrameRef {
             user_data: &frame.user_data,
@@ -2721,7 +2734,10 @@ where
         })
     }
 
-    /// Access the currently queued frame
+    /// Access the currently queued frame.
+    ///
+    /// Its presentation mode is the requested mode; the submitted mode is available through
+    /// [`pending_frame`](Self::pending_frame).
     pub fn queued_frame(&self) -> Option<FrameRef<'_, U>> {
         self.queued_frame.as_ref().map(|frame| FrameRef {
             user_data: &frame.user_data,

@@ -189,6 +189,16 @@ impl BasicDevice for DrmSurface {}
 impl ControlDevice for DrmSurface {}
 
 impl DrmSurface {
+    /// Whether the device supports asynchronous page flips for this surface's DRM API.
+    ///
+    /// Individual plane configurations or buffer formats can still reject an asynchronous flip.
+    pub fn supports_async_page_flips(&self) -> bool {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surface) => surface.supports_async_page_flips(),
+            DrmSurfaceInternal::Legacy(surface) => surface.supports_async_page_flips(),
+        }
+    }
+
     /// Returns the underlying [`DrmDeviceFd`]
     pub fn device_fd(&self) -> &DrmDeviceFd {
         match &*self.internal {
@@ -409,7 +419,7 @@ impl DrmSurface {
     /// operation if a commit really is necessary using [`commit_pending`](DrmSurface::commit_pending).
     ///
     /// This operation is not necessarily blocking until the crtc is in the desired state,
-    /// but will trigger a `vblank` event once done.
+    /// and triggers a `vblank` event once done if [`PageFlipFlags::EVENT`] is requested.
     /// Make sure to have the device registered in your event loop prior to invoking this, to not miss
     /// any generated event.
     #[profiling::function]
@@ -432,7 +442,9 @@ impl DrmSurface {
     ///
     /// This will not cause the crtc to modeset.
     ///
-    /// This operation is not blocking and will produce a `vblank` event once swapping is done.
+    /// This operation is not blocking and produces a completion event if [`PageFlipFlags::EVENT`]
+    /// is requested. [`PageFlipFlags::ASYNC`] is ignored when
+    /// [`supports_async_page_flips`](Self::supports_async_page_flips) is false.
     /// Make sure to have the device registered in your event loop to not miss the event.
     #[profiling::function]
     pub fn page_flip<'a>(

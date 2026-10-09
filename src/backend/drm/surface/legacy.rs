@@ -229,8 +229,12 @@ impl LegacyDrmSurface {
         *self.pending.read().unwrap() != *self.state.read().unwrap()
     }
 
-    fn flip_flags(&self, mut flip_flags: PageFlipFlags) -> PageFlipFlags {
-        if !self.supports_async_page_flips {
+    pub fn supports_async_page_flips(&self) -> bool {
+        self.supports_async_page_flips
+    }
+
+    fn flip_flags(supports_async_page_flips: bool, mut flip_flags: PageFlipFlags) -> PageFlipFlags {
+        if !supports_async_page_flips {
             flip_flags.remove(PageFlipFlags::ASYNC);
         }
         flip_flags
@@ -239,7 +243,7 @@ impl LegacyDrmSurface {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     #[profiling::function]
     pub fn commit(&self, framebuffer: framebuffer::Handle, flip_flags: PageFlipFlags) -> Result<(), Error> {
-        let flip_flags = self.flip_flags(flip_flags);
+        let flip_flags = Self::flip_flags(self.supports_async_page_flips, flip_flags);
 
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
@@ -350,7 +354,7 @@ impl LegacyDrmSurface {
         framebuffer: framebuffer::Handle,
         flip_flags: PageFlipFlags,
     ) -> Result<(), Error> {
-        let flip_flags = self.flip_flags(flip_flags);
+        let flip_flags = Self::flip_flags(self.supports_async_page_flips, flip_flags);
 
         trace!("Queueing Page flip");
 
@@ -512,11 +516,26 @@ impl Drop for LegacyDrmSurface {
 #[cfg(test)]
 mod test {
     use super::LegacyDrmSurface;
+    use drm::control::PageFlipFlags;
 
     fn is_send<S: Send>() {}
 
     #[test]
     fn surface_is_send() {
         is_send::<LegacyDrmSurface>();
+    }
+
+    #[test]
+    fn unsupported_async_flips_preserve_completion_events() {
+        assert_eq!(
+            LegacyDrmSurface::flip_flags(false, PageFlipFlags::ASYNC | PageFlipFlags::EVENT),
+            PageFlipFlags::EVENT
+        );
+        assert!(LegacyDrmSurface::flip_flags(false, PageFlipFlags::ASYNC).is_empty());
+        assert!(LegacyDrmSurface::flip_flags(true, PageFlipFlags::empty()).is_empty());
+        assert_eq!(
+            LegacyDrmSurface::flip_flags(true, PageFlipFlags::ASYNC | PageFlipFlags::EVENT),
+            PageFlipFlags::ASYNC | PageFlipFlags::EVENT
+        );
     }
 }

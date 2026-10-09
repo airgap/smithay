@@ -749,12 +749,16 @@ impl AtomicDrmSurface {
         })
     }
 
-    fn flip_flags(&self, value: PageFlipFlags) -> AtomicCommitFlags {
+    pub fn supports_async_page_flips(&self) -> bool {
+        self.supports_async_page_flips
+    }
+
+    fn flip_flags(supports_async_page_flips: bool, value: PageFlipFlags) -> AtomicCommitFlags {
         let mut v = AtomicCommitFlags::empty();
         if value.contains(PageFlipFlags::EVENT) {
             v |= AtomicCommitFlags::PAGE_FLIP_EVENT;
         }
-        if self.supports_async_page_flips && value.contains(PageFlipFlags::ASYNC) {
+        if supports_async_page_flips && value.contains(PageFlipFlags::ASYNC) {
             v |= AtomicCommitFlags::PAGE_FLIP_ASYNC;
         }
         v
@@ -767,7 +771,7 @@ impl AtomicDrmSurface {
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         flip_flags: super::PageFlipFlags,
     ) -> Result<(), Error> {
-        let flip_flags = self.flip_flags(flip_flags);
+        let flip_flags = Self::flip_flags(self.supports_async_page_flips, flip_flags);
 
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
@@ -843,20 +847,9 @@ impl AtomicDrmSurface {
         let result = self
             .fd
             .atomic_commit(
-                if flip_flags.contains(AtomicCommitFlags::PAGE_FLIP_EVENT) {
-                    // on the atomic api we can modeset and trigger a page_flip event on the same call!
-                    flip_flags | AtomicCommitFlags::ALLOW_MODESET
-                    // we also *should* not need to wait for completion, like with `set_crtc`,
-                    // because we have tested this exact commit already, so we do not expect any errors later down the line.
-                    //
-                    // but there is always an exception and `amdgpu` can fail in interesting ways with this flag set...
-                    // https://gitlab.freedesktop.org/drm/amd/-/issues?scope=all&utf8=%E2%9C%93&state=opened&search=drm_atomic_helper_wait_for_flip_done
-                    //
-                    // so we skip this flag:
-                    // AtomicCommitFlags::Nonblock,
-                } else {
-                    AtomicCommitFlags::ALLOW_MODESET
-                },
+                // amdgpu may fail nonblocking modesets even after a successful test.
+                // https://gitlab.freedesktop.org/drm/amd/-/issues?scope=all&utf8=%E2%9C%93&state=opened&search=drm_atomic_helper_wait_for_flip_done
+                flip_flags | AtomicCommitFlags::ALLOW_MODESET,
                 req.build()?,
             )
             .map_err(|source| {
@@ -888,7 +881,7 @@ impl AtomicDrmSurface {
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         flip_flags: PageFlipFlags,
     ) -> Result<(), Error> {
-        let flip_flags = self.flip_flags(flip_flags);
+        let flip_flags = Self::flip_flags(self.supports_async_page_flips, flip_flags);
 
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
@@ -915,14 +908,7 @@ impl AtomicDrmSurface {
         trace!(?planes, "Queueing page flip: {:?}", req);
         let res = self
             .fd
-            .atomic_commit(
-                if flip_flags.contains(AtomicCommitFlags::PAGE_FLIP_EVENT) {
-                    flip_flags | AtomicCommitFlags::NONBLOCK
-                } else {
-                    AtomicCommitFlags::NONBLOCK
-                },
-                req.build()?,
-            )
+            .atomic_commit(flip_flags | AtomicCommitFlags::NONBLOCK, req.build()?)
             .map_err(|source| {
                 Error::Access(AccessError {
                     errmsg: "Page flip commit failed",
@@ -1120,37 +1106,6 @@ impl From<Transform> for DrmRotation {
             Transform::Flipped180 => DrmRotation::REFLECT_Y | DrmRotation::ROTATE_180,
             Transform::Flipped270 => DrmRotation::REFLECT_Y | DrmRotation::ROTATE_270,
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use crate::{
-        backend::drm::surface::atomic::to_fixed,
-        utils::{Physical, Rectangle},
-    };
-
-    use super::AtomicDrmSurface;
-
-    fn is_send<S: Send>() {}
-
-    #[test]
-    fn surface_is_send() {
-        is_send::<AtomicDrmSurface>();
-    }
-
-    #[test]
-    fn test_fixed_point() {
-        let geometry: Rectangle<f64, Physical> = Rectangle::from_size((1920.0, 1080.0).into());
-        let fixed = to_fixed(geometry.size.w) as u64;
-        assert_eq!(125829120, fixed);
-    }
-
-    #[test]
-    fn test_fractional_fixed_point() {
-        let geometry: Rectangle<f64, Physical> = Rectangle::from_size((1920.1, 1080.0).into());
-        let fixed = to_fixed(geometry.size.w) as u64;
-        assert_eq!(125835674, fixed);
     }
 }
 
@@ -1693,5 +1648,63 @@ impl<'a> AtomicRequest<'a> {
         }
 
         Ok(req)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::{
+        backend::drm::surface::atomic::to_fixed,
+        utils::{Physical, Rectangle},
+    };
+    use drm::control::{AtomicCommitFlags, PageFlipFlags};
+
+    use super::AtomicDrmSurface;
+
+    fn is_send<S: Send>() {}
+
+    #[test]
+    fn surface_is_send() {
+        is_send::<AtomicDrmSurface>();
+    }
+
+    #[test]
+    fn async_flip_flags_preserve_independent_event_requests() {
+        assert_eq!(
+            AtomicDrmSurface::flip_flags(true, PageFlipFlags::ASYNC),
+            AtomicCommitFlags::PAGE_FLIP_ASYNC
+        );
+        assert_eq!(
+            AtomicDrmSurface::flip_flags(true, PageFlipFlags::ASYNC | PageFlipFlags::EVENT),
+            AtomicCommitFlags::PAGE_FLIP_ASYNC | AtomicCommitFlags::PAGE_FLIP_EVENT
+        );
+        assert_eq!(
+            AtomicDrmSurface::flip_flags(true, PageFlipFlags::EVENT),
+            AtomicCommitFlags::PAGE_FLIP_EVENT
+        );
+        assert!(AtomicDrmSurface::flip_flags(true, PageFlipFlags::empty()).is_empty());
+    }
+
+    #[test]
+    fn unsupported_async_flips_preserve_completion_events() {
+        assert_eq!(
+            AtomicDrmSurface::flip_flags(false, PageFlipFlags::ASYNC | PageFlipFlags::EVENT),
+            AtomicCommitFlags::PAGE_FLIP_EVENT
+        );
+        assert!(AtomicDrmSurface::flip_flags(false, PageFlipFlags::ASYNC).is_empty());
+    }
+
+    #[test]
+    fn test_fixed_point() {
+        let geometry: Rectangle<f64, Physical> = Rectangle::from_size((1920.0, 1080.0).into());
+        let fixed = to_fixed(geometry.size.w) as u64;
+        assert_eq!(125829120, fixed);
+    }
+
+    #[test]
+    fn test_fractional_fixed_point() {
+        let geometry: Rectangle<f64, Physical> = Rectangle::from_size((1920.1, 1080.0).into());
+        let fixed = to_fixed(geometry.size.w) as u64;
+        assert_eq!(125835674, fixed);
     }
 }
