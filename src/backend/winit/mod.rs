@@ -577,6 +577,25 @@ impl<F: FnMut(WinitEvent)> ApplicationHandler for WinitEventLoopApp<'_, F> {
                 };
                 (self.callback)(WinitEvent::Input(event));
             }
+            // Wayland can deliver a click after enter without an intervening motion event.
+            WindowEvent::PointerEntered {
+                position,
+                kind: PointerKind::Mouse,
+                ..
+            } => {
+                let size = window.surface_size();
+                let event = InputEvent::PointerMotionAbsolute {
+                    event: WinitMouseMovedEvent {
+                        time: self.timestamp(),
+                        position: RelativePosition::new(
+                            position.x / size.width as f64,
+                            position.y / size.height as f64,
+                        ),
+                        global_position: position,
+                    },
+                };
+                (self.callback)(WinitEvent::Input(event));
+            }
             WindowEvent::PointerMoved { position, source, .. } => {
                 let size = window.surface_size();
                 let x = position.x / size.width as f64;
