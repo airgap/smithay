@@ -122,6 +122,8 @@ where
         scale_factor: 1.0,
         pinch_gesture_state: PinchGestureState::default(),
         key_counter: 0,
+        active_touches: std::collections::HashSet::new(),
+        touch_frame_pending: false,
         // Will be initialized after window creation
         window: None,
         window_create_error: None,
@@ -393,6 +395,8 @@ struct WinitEventLoopInner {
     window: Option<Arc<dyn WinitWindow>>,
     window_create_error: Option<Error>,
     key_counter: u32,
+    active_touches: std::collections::HashSet<u64>,
+    touch_frame_pending: bool,
     is_x11: bool,
     scale_factor: f64,
     pinch_gesture_state: PinchGestureState,
@@ -614,6 +618,7 @@ impl<F: FnMut(WinitEvent)> ApplicationHandler for WinitEventLoopApp<'_, F> {
                         (self.callback)(WinitEvent::Input(event));
                     }
                     PointerSource::Touch { finger_id, force: _ } => {
+                        self.inner.touch_frame_pending = true;
                         let event = InputEvent::TouchMotion {
                             event: WinitTouchMovedEvent {
                                 time: self.timestamp(),
@@ -660,7 +665,9 @@ impl<F: FnMut(WinitEvent)> ApplicationHandler for WinitEventLoopApp<'_, F> {
                         ElementState::Pressed => {
                             let size = window.surface_size();
                             let x = position.x / size.width as f64;
-                            let y = position.y / size.width as f64;
+                            let y = position.y / size.height as f64;
+                            self.inner.active_touches.insert(finger_id.into_raw() as u64);
+                            self.inner.touch_frame_pending = true;
                             let event = InputEvent::TouchDown {
                                 event: WinitTouchStartedEvent {
                                     time: self.timestamp(),
@@ -675,7 +682,9 @@ impl<F: FnMut(WinitEvent)> ApplicationHandler for WinitEventLoopApp<'_, F> {
                         ElementState::Released => {
                             let size = window.surface_size();
                             let x = position.x / size.width as f64;
-                            let y = position.y / size.width as f64;
+                            let y = position.y / size.height as f64;
+                            self.inner.active_touches.remove(&(finger_id.into_raw() as u64));
+                            self.inner.touch_frame_pending = true;
                             let event = InputEvent::TouchMotion {
                                 event: WinitTouchMovedEvent {
                                     time: self.timestamp(),
@@ -704,7 +713,10 @@ impl<F: FnMut(WinitEvent)> ApplicationHandler for WinitEventLoopApp<'_, F> {
             WindowEvent::PointerLeft {
                 kind: PointerKind::Touch(finger_id),
                 ..
-            } => {
+            } if self.inner.active_touches.contains(&(finger_id.into_raw() as u64)) => {
+                // Winit also emits PointerLeft after a normal up; only a still-active contact is cancelled.
+                self.inner.active_touches.clear();
+                self.inner.touch_frame_pending = true;
                 let event = InputEvent::TouchCancel {
                     event: WinitTouchCancelledEvent {
                         time: self.timestamp(),
@@ -801,6 +813,18 @@ impl<F: FnMut(WinitEvent)> ApplicationHandler for WinitEventLoopApp<'_, F> {
                 (self.callback)(WinitEvent::Input(event));
             }
             _ => (),
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        if std::mem::take(&mut self.inner.touch_frame_pending) {
+            // Winit exposes individual pointer events, so finish their batch before sleeping.
+            let event = InputEvent::TouchFrame {
+                event: WinitTouchFrameEvent {
+                    time: self.timestamp(),
+                },
+            };
+            (self.callback)(WinitEvent::Input(event));
         }
     }
 }

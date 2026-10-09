@@ -10,7 +10,8 @@ use crate::backend::input::{
     DeviceCapability, Event, GestureBeginEvent, GestureEndEvent, GestureHoldBeginEvent, GestureHoldEndEvent,
     GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent, InputBackend, InputTime, KeyState,
     KeyboardKeyEvent, Keycode, PointerAxisEvent, PointerButtonEvent, PointerMotionAbsoluteEvent,
-    TouchCancelEvent, TouchDownEvent, TouchEvent, TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
+    TouchCancelEvent, TouchDownEvent, TouchEvent, TouchFrameEvent, TouchMotionEvent, TouchSlot, TouchUpEvent,
+    UnusedEvent,
 };
 
 /// Marker used to define the `InputBackend` types for the winit backend.
@@ -325,6 +326,24 @@ impl TouchEvent<WinitInput> for WinitTouchEndedEvent {
     }
 }
 
+/// Winit-Backend event completing a batch of touch events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WinitTouchFrameEvent {
+    pub(crate) time: InputTime,
+}
+
+impl Event<WinitInput> for WinitTouchFrameEvent {
+    fn time(&self) -> InputTime {
+        self.time
+    }
+
+    fn device(&self) -> WinitVirtualDevice {
+        WinitVirtualDevice
+    }
+}
+
+impl TouchFrameEvent<WinitInput> for WinitTouchFrameEvent {}
+
 /// Winit-Backend internal event wrapping `winit`'s types into a [`TouchCancelEvent`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WinitTouchCancelledEvent {
@@ -545,7 +564,7 @@ impl InputBackend for WinitInput {
     type TouchUpEvent = WinitTouchEndedEvent;
     type TouchMotionEvent = WinitTouchMovedEvent;
     type TouchCancelEvent = WinitTouchCancelledEvent;
-    type TouchFrameEvent = UnusedEvent;
+    type TouchFrameEvent = WinitTouchFrameEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
