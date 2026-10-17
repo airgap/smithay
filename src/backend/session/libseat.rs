@@ -109,6 +109,22 @@ impl LibSeatSession {
         })
         .map_err(|err| Error::FailedToOpenSession(Errno::from_raw_os_error(err.into())))
     }
+
+    /// Returns the flag behind [`Session::is_active`], for reading it from other threads.
+    ///
+    /// The flag is cleared before the pause is acknowledged to libseat, so a thread that still
+    /// sees it set knows the devices have not been revoked by this pause yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the [`LibSeatSessionNotifier`] has been dropped.
+    pub fn active_flag(&self) -> Arc<AtomicBool> {
+        let internal = self
+            .internal
+            .upgrade()
+            .expect("the libseat session notifier outlives its sessions");
+        internal.active.clone()
+    }
 }
 
 impl Session for LibSeatSession {
